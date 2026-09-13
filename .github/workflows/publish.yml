@@ -41,4 +41,4 @@ jobs:
             ${{ steps.meta.outputs.image }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.description=DMS + Hyprland/niri/Mango nested test rig
+            org.opencontainers.image.description=DMS + Hyprland/niri/Mango/sway/labwc/Miracle WM nested test rig

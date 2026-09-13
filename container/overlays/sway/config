@@ -1,0 +1,21 @@
+# dms-testbed config for sway. Copied over ~/.config/sway/config on every `testbed.sh run`; edit it in the repo.
+# DMS has no sway config generator, so this whole file is testbed-owned. The nested output is WL-1
+# and is sized by the host window.
+
+exec dms run
+exec /opt/testbed/overlays/common/testbed-windows.sh
+
+default_border pixel 2
+focus_follows_mouse no
+
+# Spread the test windows over workspaces so the switcher lists more than one.
+assign [app_id="testbed-b"] workspace number 2
+assign [app_id="testbed-c"] workspace number 3
+
+# Host-safe binds: the host compositor owns Super combos and the host DMS owns Alt+Space.
+bindsym Ctrl+Alt+space exec dms ipc call spotlight toggleQuery "> "
+bindsym Ctrl+Alt+Return exec foot
+bindsym Ctrl+Alt+1 workspace number 1
+bindsym Ctrl+Alt+2 workspace number 2
+bindsym Ctrl+Alt+3 workspace number 3
+bindsym Ctrl+Alt+q kill

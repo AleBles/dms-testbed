@@ -3,17 +3,20 @@
 # Works from a plugin repo (the current directory is mounted when it has a plugin.json) or standalone.
 #
 #   dms-testbed pull | build [--no-cache]              # image: ghcr.io/alebles/dms-testbed (build tags it locally)
-#   dms-testbed run <mango|niri|hyprland> [--sw] [--plugin DIR]...   # --sw: software rendering (not Hyprland)
+#   dms-testbed run <comp> [--sw] [--plugin DIR]...   # comp: mango|niri|hyprland|sway|labwc|miracle; --sw: software rendering (wlroots ones)
 #   dms-testbed open <comp> [query]                    # open the launcher, optionally pre-filled ("> ")
 #   dms-testbed ipc <comp> <target> <function> [args]  # e.g. ipc mango spotlight toggleQuery "> "
-#   dms-testbed exec <comp> <command...>               # run a command inside the session (hyprctl, niri msg, mmsg)
+#   dms-testbed exec <comp> <command...>               # run a command inside the session (hyprctl, niri msg, mmsg, swaymsg)
+#   dms-testbed switch <comp> <n>                      # focus workspace/tag/desktop n, whatever the compositor calls it
 #   dms-testbed reload <comp> [pluginId]              # default pluginId: spotlightFocus
+#   dms-testbed start <comp>|all                      # start a stopped container again (same mounts, no recreate)
+#   dms-testbed restart-shell <comp>                  # restart DMS inside the running container (after adding plugin files)
 #   dms-testbed shell <comp>                          # bash inside the session env
 #   dms-testbed logs <comp> [--dms]                   # compositor log, or the DMS log
 #   dms-testbed shot <comp> [out.png]                 # screenshot taken inside the nested compositor
 #   dms-testbed status | stop <comp>|all | rm <comp>|all [--purge]
 #
-# Plugins mounted by `run`: every --plugin DIR; else the current directory if it has a plugin.json;
+# Plugins mounted by `run` (read-only into ~/.config/DankMaterialShell/plugins/): every --plugin DIR; else the current directory if it has a plugin.json;
 # else every $TESTBED_PLUGIN_ROOT/$TESTBED_PLUGIN_GLOB dir with one (defaults: parent dir, dms-*).
 # Env overrides: TESTBED_IMAGE, TESTBED_PLUGIN_ROOT, TESTBED_PLUGIN_GLOB, TESTBED_HOST_TWEAKS=0 (do not
 # raise the host Hyprland ANR ping tolerance; nested compositors miss pings while their window is hidden).
@@ -25,8 +28,9 @@ PLUGIN_GLOB=${TESTBED_PLUGIN_GLOB:-dms-*}
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 
 die() { printf 'testbed: %s\n' "$*" >&2; exit 1; }
+ALL_COMPS="mango niri hyprland sway labwc miracle"
 need_comp() {
-    case "${1:-}" in mango|niri|hyprland) ;; *) die "compositor must be mango, niri or hyprland" ;; esac
+    case "${1:-}" in mango|niri|hyprland|sway|labwc|miracle) ;; *) die "compositor must be one of: $ALL_COMPS" ;; esac
 }
 name_of() { printf 'dms-testbed-%s' "$1"; }
 vol_of()  { printf 'dms-testbed-home-%s' "$1"; }
@@ -39,7 +43,8 @@ check_host() {
     [ -c /dev/dri/renderD128 ] || die "/dev/dri/renderD128 not found"
 }
 
-# One -v per plugin dir that has a plugin.json. Args: explicit dirs; none = cwd or the sibling glob.
+# One -v per plugin dir that has a plugin.json, bind-mounted straight into the DMS plugins dir.
+# Args: explicit dirs; none = cwd or the sibling glob.
 plugin_mounts() {
     local dirs=("$@") d
     if [ ${#dirs[@]} -eq 0 ]; then
@@ -48,7 +53,7 @@ plugin_mounts() {
     for d in "${dirs[@]}"; do
         d=$(readlink -f "$d")
         [ -f "$d/plugin.json" ] || { echo "testbed: skipping $d (no plugin.json)" >&2; continue; }
-        printf -- '-v\n%s:/plugins/%s:ro\n' "$d" "$(basename "$d")"
+        printf -- '-v\n%s:/home/tester/.config/DankMaterialShell/plugins/%s:ro\n' "$d" "$(basename "$d")"
     done
 }
 
@@ -123,6 +128,12 @@ cmd_run() {
         "$IMAGE" "$comp" >/dev/null
 
     echo "testbed: started $name; waiting for DMS to detect the compositor..."
+    wait_ready "$comp"
+}
+
+# Wait until the shell in the container answers IPC (the built-in plugins target).
+wait_ready() {
+    local comp=$1 name; name=$(name_of "$comp")
     local i
     for i in $(seq 1 40); do
         running "$name" || { docker logs "$name" 2>&1 | tail -30; die "$name exited"; }
@@ -132,13 +143,13 @@ cmd_run() {
         fi
         sleep 1
     done
-    # The shell registers its IPC targets a little after it starts; wait for the launcher's.
+    # The shell registers its IPC targets a little after it starts; wait for the built-in plugins target.
     local targets
     for i in $(seq 1 90); do
         # Capture instead of piping into grep -q: an early pipe close would fail under pipefail.
         targets=$(in_session "$name" dms ipc show 2>/dev/null || true)
-        if [ "${targets#*target spotlight}" != "$targets" ]; then
-            echo "testbed: ready. Try: dms-testbed open $comp '> '"
+        if [ "${targets#*target plugins}" != "$targets" ]; then
+            echo "testbed: ready. Try: dms-testbed switch $comp 2   or   dms-testbed open $comp '> '"
             return 0
         fi
         sleep 1
@@ -165,9 +176,46 @@ cmd_exec() {
     in_session "$name" "$@"
 }
 
+# Focus workspace n with whatever the compositor calls it (workspace, tag, desktop). labwc has no
+# command IPC for this, so it gets the Ctrl+Alt+n keybind from the overlay typed over the
+# virtual-keyboard protocol.
+cmd_switch() {
+    local comp=$1; shift; need_comp "$comp"
+    local n=${1:-}; [ -n "$n" ] || die "switch needs a workspace number"
+    case "$comp" in
+        hyprland) cmd_exec "$comp" hyprctl dispatch "hl.dsp.focus({ workspace = [[$n]] })" ;;
+        niri)     cmd_exec "$comp" niri msg action focus-workspace "$n" ;;
+        mango)    cmd_exec "$comp" mmsg dispatch "view,$n" ;;
+        sway)     cmd_exec "$comp" swaymsg workspace number "$n" ;;
+        miracle)  cmd_exec "$comp" sh -c 'swaymsg -s "$MIRACLESOCK" workspace "$1" 2>/dev/null || wtype -M ctrl -M alt -k "$1" -m alt -m ctrl' sh "$n" ;;   # no "number": miracle takes it literally
+        labwc)    cmd_exec "$comp" wtype -M ctrl -M alt -k "$n" -m alt -m ctrl ;;
+    esac
+}
+
 cmd_reload() {
     local comp=$1; shift; need_comp "$comp"
     cmd_ipc "$comp" plugins reload "${1:-spotlightFocus}"
+}
+
+# Start an existing, stopped container again (keeps its mounts and home volume; `run` would recreate it).
+cmd_start() {
+    local c name; for c in $(each_comp "${1:-}"); do
+        name=$(name_of "$c")
+        docker inspect "$name" >/dev/null 2>&1 || { echo "testbed: $name does not exist; use: dms-testbed run $c" >&2; continue; }
+        running "$name" && { echo "$name already running"; continue; }
+        check_host; host_anr_tolerance
+        docker start "$name" >/dev/null && echo "started $name" && wait_ready "$c"
+    done
+}
+
+# Restart the shell inside the session. Needed after adding *new* files to a plugin: Qt caches the
+# directory listing at first load, so `reload` alone reports "File name case mismatch" for them.
+cmd_restart_shell() {
+    local comp=$1; need_comp "$comp"
+    local name; name=$(name_of "$comp")
+    running "$name" || die "$name is not running"
+    in_session "$name" dms restart >/dev/null 2>&1 || true
+    wait_ready "$comp"
 }
 
 cmd_shell() {
@@ -193,7 +241,13 @@ cmd_shot() {
     local name; name=$(name_of "$comp")
     running "$name" || die "$name is not running"
     mkdir -p "$(dirname "$out")"
-    in_session "$name" sh -c 'grim -t png - ' > "$out" && echo "$out"
+    # Write to a temp file first so a failed capture never leaves a 0-byte screenshot behind.
+    local tmp="$out.part"
+    if in_session "$name" sh -c 'grim -t png - ' > "$tmp" && [ -s "$tmp" ]; then
+        mv "$tmp" "$out" && echo "$out"
+    else
+        rm -f "$tmp"; die "screenshot failed on $comp (grim needs wlr-screencopy and a mapped output)"
+    fi
 }
 
 cmd_status() {
@@ -201,7 +255,7 @@ cmd_status() {
     docker volume ls --filter name='^dms-testbed-home-' --format 'volume {{.Name}}'
 }
 
-each_comp() { if [ "${1:-}" = "all" ]; then echo mango niri hyprland; else need_comp "${1:-}"; echo "$1"; fi; }
+each_comp() { if [ "${1:-}" = "all" ]; then echo "$ALL_COMPS"; else need_comp "${1:-}"; echo "$1"; fi; }
 
 cmd_stop() {
     local c; for c in $(each_comp "${1:-}"); do docker stop -t 5 "$(name_of "$c")" >/dev/null 2>&1 && echo "stopped $(name_of "$c")" || true; done
@@ -226,13 +280,16 @@ case "$sub" in
     open)   cmd_open "$@" ;;
     ipc)    cmd_ipc "$@" ;;
     exec)   cmd_exec "$@" ;;
+    switch) cmd_switch "$@" ;;
     reload) cmd_reload "$@" ;;
+    start)  cmd_start "$@" ;;
+    restart-shell) cmd_restart_shell "$@" ;;
     shell)  cmd_shell "$@" ;;
     logs)   cmd_logs "$@" ;;
     shot)   cmd_shot "$@" ;;
     status) cmd_status ;;
     stop)   cmd_stop "$@" ;;
     rm)     cmd_rm "$@" ;;
-    ""|-h|--help|help) sed -n '2,19p' "$0" ;;
+    ""|-h|--help|help) sed -n '2,22p' "$0" ;;
     *) die "unknown subcommand: $sub (try --help)" ;;
 esac

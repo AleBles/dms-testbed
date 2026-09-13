@@ -1,6 +1,6 @@
 # dms-testbed
 
-A Docker image with [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) and three compositors, Hyprland, niri and Mango (mangowc), for testing DMS plugins on compositors you do not run yourself. The chosen compositor starts **nested** against your host Wayland display, so it shows up as a normal window on your desktop. DMS runs inside it with your plugin repos mounted, and you drive the shell from the host with `dms ipc` through `docker exec`.
+A Docker image with [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) and the six compositors DMS documents, Hyprland, niri, Mango (mangowc), sway, labwc and Miracle WM, for testing DMS plugins on compositors you do not run yourself. The chosen compositor starts **nested** against your host Wayland display, so it shows up as a normal window on your desktop. DMS runs inside it with your plugin repos mounted, and you drive the shell from the host with `dms ipc` through `docker exec`.
 
 ## Host requirements
 
@@ -20,6 +20,7 @@ The image is published to `ghcr.io/alebles/dms-testbed` by the workflow in this 
     "test:mango": "dms-testbed run mango && dms-testbed open mango '> '",
     "test:niri": "dms-testbed run niri && dms-testbed open niri '> '",
     "test:hyprland": "dms-testbed run hyprland && dms-testbed open hyprland '> '",
+    "test:sway": "dms-testbed run sway && dms-testbed switch sway 2",
     "test:stop": "dms-testbed stop all"
   }
 }
@@ -30,24 +31,27 @@ The image is published to `ghcr.io/alebles/dms-testbed` by the workflow in this 
 ## Quick start (standalone)
 
 ```sh
-./testbed.sh pull             # or: ./testbed.sh build   (Fedora 44 image: dms, quickshell-git, hyprland, niri, mangowm)
+./testbed.sh pull             # or: ./testbed.sh build   (Fedora 44 image: dms, quickshell-git, hyprland, niri, mangowm, sway, labwc, miracle-wm)
 ./testbed.sh run mango        # a Mango window appears; DMS starts inside with your plugins
 ./testbed.sh open mango "> "  # open the launcher pre-filled with a plugin trigger
 ./testbed.sh ipc mango spotlight toggleQuery "> "
 ./testbed.sh exec mango mmsg dispatch view,2   # any command inside the nested session
+./testbed.sh switch mango 2                    # focus workspace/tag/desktop 2 on any compositor
 ./testbed.sh reload mango spotlightFocus
 ./testbed.sh shot mango launcher.png   # screenshot from inside the nested compositor
 ./testbed.sh logs mango --dms
 ./testbed.sh stop mango
+./testbed.sh start mango         # same container again, no recreate
+./testbed.sh restart-shell mango # restart DMS inside it (after adding plugin files)
 ```
 
-`run niri` and `run hyprland` work the same. All three can run at once; each has its own container and home volume. Standalone, `run` mounts every sibling directory matching `dms-*` that has a `plugin.json`; `--plugin DIR` picks explicit ones.
+`run niri`, `run hyprland`, `run sway`, `run labwc` and `run miracle` work the same. All six can run at once; each has its own container and home volume. Standalone, `run` mounts every sibling directory matching `dms-*` that has a `plugin.json`; `--plugin DIR` picks explicit ones.
 
 ## What happens on `run`
 
-1. The container gets a private tmpfs `XDG_RUNTIME_DIR`, the host Wayland socket at `/run/host-wayland/wayland-1`, the GPU render node, a named volume for `/home/tester`, and the plugin repos read-only under `/plugins/`.
-2. The entrypoint starts a session D-Bus, links the plugins into `~/.config/DankMaterialShell/plugins/`, runs `dms setup headless --compositor <comp> --terminal kitty --no-systemd --skip-existing` on first run, and copies the testbed overlay from `container/overlays/<comp>/` into the compositor config.
-3. The compositor starts nested with `WAYLAND_DISPLAY=wayland-host`. Its DMS-generated config starts `dms run`, and the overlay opens three `foot` terminals so the window switcher has content.
+1. The container gets a private tmpfs `XDG_RUNTIME_DIR`, the host Wayland socket at `/run/host-wayland/wayland-1`, the GPU render node, a named volume for `/home/tester`, and the plugin repos bind-mounted read-only straight into `~/.config/DankMaterialShell/plugins/`.
+2. The entrypoint starts a session D-Bus, runs `dms setup headless --compositor <comp> --terminal kitty --no-systemd --skip-existing` on first run (niri, Hyprland, Mango), and copies the testbed overlay from `container/overlays/<comp>/` into the compositor config. sway, labwc and Miracle WM have no DMS config generator, so their whole config is the overlay.
+3. The compositor starts nested with `WAYLAND_DISPLAY=wayland-host` (wlroots ones via `WLR_BACKENDS=wayland`). Its config starts `dms run`, and the overlay opens three `foot` terminals so the window switcher has content. Miracle WM is the exception: it runs on Mir's headless virtual platform (no window on your desktop; `shot` still works through screencopy) and `container/overlays/miracle/launch.sh` starts DMS on Mir's own display `wayland-mir` with Mir's i3-compatible IPC socket exported. Mir's nested Wayland platform crashed in its GL renderer on the render node and stalled its event loop with software buffers on the machine this was written on; `TESTBED_MIRACLE_NESTED=1` in the container environment tries it anyway (`docker run -e`, or edit the entrypoint).
 4. Once the shell runs, its environment is captured into `/run/user/1000/testbed.env`, which `testbed.sh ipc` and `shell` source so `dms ipc` reaches the right instance.
 
 ## Keys inside the nested window
@@ -58,24 +62,25 @@ The host compositor owns Super combos and the host DMS owns Alt+Space, so the ov
 |---|---|
 | Ctrl+Alt+Space | open the launcher with the Spotlight Focus trigger |
 | Ctrl+Alt+Return | new `foot` terminal |
-| Ctrl+Alt+1..3 | workspace or tag 1..3 |
-| Ctrl+Alt+Q | close window (Mango, niri) |
+| Ctrl+Alt+1..3 | workspace, tag or desktop 1..3 |
+| Ctrl+Alt+Q | close window (Mango, niri, sway, labwc) |
 
-Click into the nested window first so it has keyboard focus. If keys do not arrive, use `./testbed.sh ipc` instead.
+Click into the nested window first so it has keyboard focus. If keys do not arrive, use `./testbed.sh ipc` or `./testbed.sh switch` instead.
 
 ## Per-compositor expectations
 
-| | Mango | niri | Hyprland |
-|---|---|---|---|
-| Nesting | wlroots Wayland backend | winit window | Aquamarine Wayland backend, needs GPU |
-| Live window previews | no, icons (quickshell 0.3 captures toplevels only via hyprland-toplevel-export) | no, icons | yes |
-| Software rendering (`--sw`) | yes | yes, slow | no |
-| Nested output name | `WL-1` | `winit` | `WAYLAND-1` |
-| Workspaces | tags per monitor | named workspaces `logs` and `shell` from the overlay | numbered; overlay window rules put Test B on 2 and Test C on 3 |
+| | Mango | niri | Hyprland | sway | labwc | Miracle WM |
+|---|---|---|---|---|---|---|
+| Nesting | wlroots Wayland backend | winit window | Aquamarine Wayland backend, needs GPU | wlroots Wayland backend | wlroots Wayland backend | none: Mir virtual output, headless (nested Mir is opt-in, see below) |
+| Live window previews | no, icons (quickshell 0.3 captures toplevels only via hyprland-toplevel-export) | no, icons | yes | no, icons | no, icons | no, icons |
+| Software rendering (`--sw`) | yes | yes, slow | no | yes | yes | n/a |
+| Nested output name | `WL-1` | `winit` | `WAYLAND-1` | `WL-1` | `WL-1` | `Virtual-1` |
+| Workspaces | tags per monitor | named workspaces `logs` and `shell` from the overlay | numbered; overlay window rules put Test B on 2 and Test C on 3 | numbered; `assign` puts Test B on 2 and Test C on 3 | three desktops `main`, `logs`, `shell` over ext-workspace-v1; window rules put Test B on 2 and Test C on 3 | default 0-9 over the i3 IPC |
+| `switch` uses | `mmsg dispatch view,N` | `niri msg action focus-workspace N` | `hyprctl dispatch hl.dsp.focus(...)` | `swaymsg workspace number N` | `wtype` Ctrl+Alt+N (no command IPC) | `swaymsg -s $MIRACLESOCK workspace N` |
 
 ## Editing plugins
 
-Edit the plugin on the host as usual, then `./testbed.sh reload <comp> <pluginId>`. The DMS log is at `~/.local/state/dms-testbed/dms-<comp>.log` inside the volume (`logs <comp> --dms`).
+Keep the containers running; one container is one nested compositor window. Edit the plugin on the host as usual, then `./testbed.sh reload <comp> <pluginId>`. Adding *new* files to a plugin needs a fresh shell process, not a fresh container: `./testbed.sh restart-shell <comp>` restarts DMS inside the session (Qt caches the directory listing at first load, and a file added later fails on reload with `File name case mismatch`). `./testbed.sh run <comp>` recreates the container and is only needed after an image change; a stopped container comes back with `./testbed.sh start <comp>|all`, mounts included. To exercise workspace-driven plugins, `./testbed.sh switch <comp> 2` focuses the second workspace however the compositor names it. The DMS log is at `~/.local/state/dms-testbed/dms-<comp>.log` inside the volume (`logs <comp> --dms`).
 
 ## Troubleshooting
 

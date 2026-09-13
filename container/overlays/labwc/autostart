@@ -1,0 +1,4 @@
+#!/bin/sh
+# dms-testbed autostart for labwc. Copied over ~/.config/labwc/autostart on every `testbed.sh run`.
+dms run &
+/opt/testbed/overlays/common/testbed-windows.sh &

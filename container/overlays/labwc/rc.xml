@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- dms-testbed config for labwc. Copied over ~/.config/labwc/rc.xml on every `testbed.sh run`; edit it in the repo.
+     labwc exposes its desktops over ext-workspace-v1, which is how DMS (and the ext-workspace path of plugins)
+     sees them. Named desktops exercise the name handling too. -->
+<labwc_config>
+  <desktops number="3">
+    <popupTime>0</popupTime>
+    <names>
+      <name>main</name>
+      <name>logs</name>
+      <name>shell</name>
+    </names>
+  </desktops>
+
+  <theme>
+    <name></name>
+    <cornerRadius>8</cornerRadius>
+  </theme>
+
+  <!-- Host-safe binds: the host compositor owns Super combos and the host DMS owns Alt+Space. -->
+  <keyboard>
+    <default />
+    <keybind key="C-A-space"><action name="Execute" command="dms ipc call spotlight toggleQuery &quot;&gt; &quot;" /></keybind>
+    <keybind key="C-A-Return"><action name="Execute" command="foot" /></keybind>
+    <keybind key="C-A-1"><action name="GoToDesktop" to="1" /></keybind>
+    <keybind key="C-A-2"><action name="GoToDesktop" to="2" /></keybind>
+    <keybind key="C-A-3"><action name="GoToDesktop" to="3" /></keybind>
+    <keybind key="C-A-q"><action name="Close" /></keybind>
+  </keyboard>
+
+  <!-- Spread the test windows over desktops so the switcher lists more than one. -->
+  <windowRules>
+    <windowRule identifier="testbed-b"><action name="SendToDesktop" to="2" follow="no" /></windowRule>
+    <windowRule identifier="testbed-c"><action name="SendToDesktop" to="3" follow="no" /></windowRule>
+  </windowRules>
+</labwc_config>

@@ -1,0 +1,28 @@
+# dms-testbed config for Miracle WM. Copied over ~/.config/miracle-wm/config.yaml on every `testbed.sh run`;
+# edit it in the repo. Miracle speaks the i3/sway IPC (MIRACLESOCK, also exported as SWAYSOCK), so
+# `testbed.sh switch miracle N` uses swaymsg against it. Workspaces are the default 0-9.
+# Ctrl+Alt+N selects workspace N like the other overlays (host-safe: the host owns Super).
+# No startup_apps: nested Mir hands them the host WAYLAND_DISPLAY, so DMS would attach to the host shell.
+# launch.sh (started by the entrypoint) waits for Mir's own socket and starts dms + the test windows on it.
+startup_apps: []
+
+border:
+  size: 2
+  color: 0x8888ffff
+  focus_color: 0xd0bcffff
+
+enable_animations: false
+
+default_action_overrides:
+  - name: select_workspace_1
+    action: down
+    modifiers: [ctrl, alt]
+    key: "1"
+  - name: select_workspace_2
+    action: down
+    modifiers: [ctrl, alt]
+    key: "2"
+  - name: select_workspace_3
+    action: down
+    modifiers: [ctrl, alt]
+    key: "3"

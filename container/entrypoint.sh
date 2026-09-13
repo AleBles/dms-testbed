@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # dms-testbed entrypoint: start one compositor nested on the host Wayland display, with DMS inside.
-#   entrypoint.sh <mango|niri|hyprland>
+#   entrypoint.sh <mango|niri|hyprland|sway|labwc|miracle>
 set -euo pipefail
 
-COMP=${1:?usage: entrypoint.sh <mango|niri|hyprland>}
-case "$COMP" in mango|niri|hyprland) ;; *) echo "unknown compositor: $COMP" >&2; exit 2 ;; esac
+COMP=${1:?usage: entrypoint.sh <mango|niri|hyprland|sway|labwc|miracle>}
+case "$COMP" in mango|niri|hyprland|sway|labwc|miracle) ;; *) echo "unknown compositor: $COMP" >&2; exit 2 ;; esac
 
 log() { printf '[testbed] %s\n' "$*" >&2; }
 
@@ -17,28 +17,31 @@ HOST_SOCK=/run/host-wayland/wayland-1
 ln -sfn "$HOST_SOCK" "$XDG_RUNTIME_DIR/wayland-host"
 
 # Never let host compositor identity leak into the nested session (DMS falls back to these vars).
-unset HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET MANGO_INSTANCE_SIGNATURE DISPLAY \
+unset HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET MANGO_INSTANCE_SIGNATURE SWAYSOCK I3SOCK MIRACLESOCK LABWC_PID DISPLAY \
       DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_ID WAYLAND_SOCKET || true
 
 # ---- session bus at a fixed path so `docker exec` can find it ------------------------------------
 dbus-daemon --session --fork --nopidfile --address="unix:path=$XDG_RUNTIME_DIR/bus"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 
-# ---- plugins: /plugins/<dir> (host repos, read-only) -> ~/.config/DankMaterialShell/plugins/<dir>
+# ---- plugins: host repos are bind-mounted read-only at ~/.config/DankMaterialShell/plugins/<dir> ------
 PLUGDIR="$XDG_CONFIG_HOME/DankMaterialShell/plugins"
 mkdir -p "$PLUGDIR"
-find "$PLUGDIR" -maxdepth 1 -xtype l -delete 2>/dev/null || true       # dangling links
+find "$PLUGDIR" -maxdepth 1 -xtype l -delete 2>/dev/null || true       # links left by older testbed versions
 shopt -s nullglob
-for manifest in /plugins/*/plugin.json; do
-    dir=$(dirname "$manifest")
-    ln -sfn "$dir" "$PLUGDIR/$(basename "$dir")"
-    log "plugin: $(jq -r '.id // "?"' "$manifest") <- $dir"
+for manifest in "$PLUGDIR"/*/plugin.json; do
+    log "plugin: $(jq -r '.id // "?"' "$manifest") <- $(dirname "$manifest")"
 done
 shopt -u nullglob
 
 # ---- first-run DMS setup (idempotent: existing configs are kept) ---------------------------------
-dms setup headless --compositor "$COMP" --terminal kitty --no-systemd --skip-existing \
-    || log "dms setup headless returned $? (continuing with existing configs)"
+# `dms setup headless` knows niri, Hyprland and Mango; sway, labwc and miracle get testbed-owned configs.
+case "$COMP" in
+mango|niri|hyprland)
+    dms setup headless --compositor "$COMP" --terminal kitty --no-systemd --skip-existing \
+        || log "dms setup headless returned $? (continuing with existing configs)"
+    ;;
+esac
 
 # ---- testbed overlay: copied fresh every start, included from the DMS-owned main config once ------
 OVL=/opt/testbed/overlays/$COMP
@@ -65,6 +68,23 @@ hyprland)
     cp "$OVL/testbed.lua" "$XDG_CONFIG_HOME/hypr/testbed.lua"
     append_once "$CFG" 'require("testbed")'
     ;;
+sway)
+    # Whole config is testbed-owned (DMS has no sway generator); replaced on every start.
+    mkdir -p "$XDG_CONFIG_HOME/sway"
+    CFG="$XDG_CONFIG_HOME/sway/config"
+    cp "$OVL/config" "$CFG"
+    ;;
+labwc)
+    mkdir -p "$XDG_CONFIG_HOME/labwc"
+    CFG="$XDG_CONFIG_HOME/labwc"
+    cp "$OVL/rc.xml" "$OVL/autostart" "$CFG/"
+    chmod +x "$CFG/autostart"
+    ;;
+miracle)
+    mkdir -p "$XDG_CONFIG_HOME/miracle-wm"
+    CFG="$XDG_CONFIG_HOME/miracle-wm/config.yaml"
+    cp "$OVL/config.yaml" "$CFG"
+    ;;
 esac
 
 # ---- environment for the nested compositor -----------------------------------------------------
@@ -86,13 +106,13 @@ printf 'DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS" > "$ENVFILE"
             {
                 printf 'DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS"
                 tr '\0' '\n' < "/proc/$pid/environ" \
-                    | grep -E '^(WAYLAND_DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|NIRI_SOCKET|MANGO_INSTANCE_SIGNATURE|XDG_CURRENT_DESKTOP)=' || true
+                    | grep -E '^(WAYLAND_DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|NIRI_SOCKET|MANGO_INSTANCE_SIGNATURE|SWAYSOCK|I3SOCK|MIRACLESOCK|LABWC_PID|XDG_CURRENT_DESKTOP)=' || true
             } > "$ENVFILE.tmp" && mv "$ENVFILE.tmp" "$ENVFILE"
             log "shell is up (qs pid $pid); env for docker exec written"
             sleep 2
             (
                 set -a; . "$ENVFILE"; set +a
-                for manifest in /plugins/*/plugin.json; do
+                for manifest in "$PLUGDIR"/*/plugin.json; do
                     [ -f "$manifest" ] || continue
                     id=$(jq -r '.id // empty' "$manifest"); [ -n "$id" ] || continue
                     out=$(dms ipc call plugins enable "$id" 2>&1 || true)
@@ -118,5 +138,29 @@ niri)
     ;;
 hyprland)
     exec Hyprland -c "$CFG"                    # no DRM card in the container -> Aquamarine Wayland backend
+    ;;
+sway)
+    export WLR_BACKENDS=wayland
+    exec sway -c "$CFG"                        # config execs dms run and the test windows
+    ;;
+labwc)
+    export WLR_BACKENDS=wayland
+    exec labwc -C "$CFG"                       # autostart runs dms run and the test windows
+    ;;
+miracle)
+    # Mir nested on the host display: --wayland-host is the display Mir runs on, WAYLAND_DISPLAY the one it
+    # creates (with wayland-host in WAYLAND_DISPLAY it tries to bind over the host symlink and silently ends
+    # up with no client socket). launch.sh waits for wayland-mir and starts dms + the test windows on it;
+    # startup_apps would inherit the wrong display. X11 off: Xwayland only adds noise here.
+    /opt/testbed/overlays/miracle/launch.sh &
+    export WAYLAND_DISPLAY=wayland-mir
+    # all extensions: virtual keyboard (wtype for `switch`), screencopy (grim for `shot`), foreign toplevels (DMS)
+    if [ "${TESTBED_MIRACLE_NESTED:-0}" = 1 ]; then
+        # Mir's nested Wayland platform: crashes in GLRenderer on the render node here and stalls its event
+        # loop with software buffers, so it is opt-in. Default below is a headless virtual output instead.
+        exec miracle-wm --wayland-host=wayland-host --enable-x11=0 --add-wayland-extensions=all
+    fi
+    log "miracle: headless virtual output (no host window); use TESTBED_MIRACLE_NESTED=1 to try nesting"
+    exec miracle-wm --platform-display-libs=mir:virtual --virtual-output=1600x900 --enable-x11=0 --add-wayland-extensions=all
     ;;
 esac

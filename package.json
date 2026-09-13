@@ -1,7 +1,7 @@
 {
   "name": "dms-testbed",
-  "version": "0.1.0",
-  "description": "Run DankMaterialShell plugins in nested Hyprland, niri and Mango containers",
+  "version": "0.2.0",
+  "description": "Run DankMaterialShell plugins in nested Hyprland, niri, Mango, sway, labwc and Miracle WM containers",
   "license": "MIT",
   "private": true,
   "repository": "github:AleBles/dms-testbed",
