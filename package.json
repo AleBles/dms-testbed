@@ -1,0 +1,15 @@
+{
+  "name": "dms-testbed",
+  "version": "0.1.0",
+  "description": "Run DankMaterialShell plugins in nested Hyprland, niri and Mango containers",
+  "license": "MIT",
+  "private": true,
+  "repository": "github:AleBles/dms-testbed",
+  "bin": {
+    "dms-testbed": "testbed.sh"
+  },
+  "files": [
+    "testbed.sh",
+    "README.md"
+  ]
+}

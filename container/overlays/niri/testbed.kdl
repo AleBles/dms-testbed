@@ -1,0 +1,25 @@
+// dms-testbed overlay for niri. Copied in on every `testbed.sh run`; edit it in the repo.
+// niri maps Mod to Alt when nested, and the host DMS owns Alt+Space, so binds use Ctrl+Alt.
+spawn-at-startup "/opt/testbed/overlays/common/testbed-windows.sh"
+
+// Named workspaces let the plugin's named-workspace handling be tested too.
+workspace "logs"
+workspace "shell"
+
+window-rule {
+    match app-id="^testbed-b$"
+    open-on-workspace "logs"
+}
+window-rule {
+    match app-id="^testbed-c$"
+    open-on-workspace "shell"
+}
+
+binds {
+    Ctrl+Alt+Space hotkey-overlay-title="Spotlight Focus" { spawn "dms" "ipc" "call" "spotlight" "toggleQuery" "> "; }
+    Ctrl+Alt+Return hotkey-overlay-title="Terminal" { spawn "foot"; }
+    Ctrl+Alt+1 { focus-workspace 1; }
+    Ctrl+Alt+2 { focus-workspace 2; }
+    Ctrl+Alt+3 { focus-workspace 3; }
+    Ctrl+Alt+Q { close-window; }
+}
