@@ -1,6 +1,6 @@
 # dms-testbed
 
-A Docker image with [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) and the six compositors DMS documents, Hyprland, niri, Mango (mangowc), sway, labwc and Miracle WM, for testing DMS plugins on compositors you do not run yourself. The chosen compositor starts **nested** against your host Wayland display, so it shows up as a normal window on your desktop. DMS runs inside it with your plugin repos mounted, and you drive the shell from the host with `dms ipc` through `docker exec`.
+A Docker image with [Dux Shell](https://github.com/duxlabs-dev/dux-shell) (DMS) and the six compositors DMS documents, Hyprland, niri, Mango (mangowc), sway, labwc and Miracle WM, for testing DMS plugins on compositors you do not run yourself. The chosen compositor starts **nested** against your host Wayland display, so it shows up as a normal window on your desktop. DMS runs inside it with your plugin repos mounted, and you drive the shell from the host with `dms ipc` through `docker exec`.
 
 ## Host requirements
 
@@ -49,9 +49,9 @@ The image is published to `ghcr.io/alebles/dms-testbed` by the workflow in this 
 
 ## What happens on `run`
 
-1. The container gets a private tmpfs `XDG_RUNTIME_DIR`, the host Wayland socket at `/run/host-wayland/wayland-1`, the GPU render node, a named volume for `/home/tester`, and the plugin repos bind-mounted read-only straight into `~/.config/DankMaterialShell/plugins/`.
+1. The container gets a private tmpfs `XDG_RUNTIME_DIR`, the host Wayland socket at `/run/host-wayland/wayland-1`, the GPU render node, a named volume for `/home/tester`, and the plugin repos bind-mounted read-only straight into `~/.config/dms/plugins/`.
 2. The entrypoint starts a session D-Bus, runs `dms setup headless --compositor <comp> --terminal kitty --no-systemd --skip-existing` on first run (niri, Hyprland, Mango), and copies the testbed overlay from `container/overlays/<comp>/` into the compositor config. sway, labwc and Miracle WM have no DMS config generator, so their whole config is the overlay.
-3. The compositor starts nested with `WAYLAND_DISPLAY=wayland-host` (wlroots ones via `WLR_BACKENDS=wayland`). Its config starts `dms run`, and the overlay opens three `foot` terminals so the window switcher has content. Miracle WM is the exception: it runs on Mir's headless virtual platform (no window on your desktop; `shot` still works through screencopy) and `container/overlays/miracle/launch.sh` starts DMS on Mir's own display `wayland-mir` with Mir's i3-compatible IPC socket exported. Mir's nested Wayland platform crashed in its GL renderer on the render node and stalled its event loop with software buffers on the machine this was written on; `TESTBED_MIRACLE_NESTED=1` in the container environment tries it anyway (`docker run -e`, or edit the entrypoint).
+3. The compositor starts nested with `WAYLAND_DISPLAY=wayland-host` (wlroots ones via `WLR_BACKENDS=wayland`). Its config starts `dms run`, and the overlay opens three `foot` terminals so the window switcher has content. Miracle WM is the exception: it runs on Mir's headless virtual platform (no window on your desktop; `shot` still works through screencopy) and `container/overlays/miracle/launch.sh` starts DMS on Mir's own display `wayland-mir` with Mir's i3-compatible IPC socket exported. Mir's nested Wayland platform crashed in its GL renderer on the render node and stalled its event loop with software buffers on the machine this was written on; `TESTBED_MIRACLE_NESTED=1 ./testbed.sh run miracle` tries nesting anyway.
 4. Once the shell runs, its environment is captured into `/run/user/1000/testbed.env`, which `testbed.sh ipc` and `shell` source so `dms ipc` reaches the right instance.
 
 ## Keys inside the nested window
@@ -66,6 +66,8 @@ The host compositor owns Super combos and the host DMS owns Alt+Space, so the ov
 | Ctrl+Alt+Q | close window (Mango, niri, sway, labwc) |
 
 Click into the nested window first so it has keyboard focus. If keys do not arrive, use `./testbed.sh ipc` or `./testbed.sh switch` instead.
+
+On a Hyprland host the nested windows do not open on your active workspace: `run` and `start` add a window rule that sends them to the first of `TESTBED_HOST_WORKSPACES` (default `9 10`) silently and then spread them evenly over that list. Set `TESTBED_HOST_MONITOR=eDP-1` to create those workspaces on one monitor, so nested windows never open on the screen you are working on. Set `TESTBED_HOST_WORKSPACES=""` to leave them where they open, or `TESTBED_HOST_TWEAKS=0` to touch the host Hyprland not at all.
 
 ## Per-compositor expectations
 
@@ -93,6 +95,7 @@ Keep the containers running; one container is one nested compositor window. Edit
 | Hotkeys do nothing | | the host grabbed them; use `ipc` |
 | Stale state after image changes | | `./testbed.sh rm <comp> --purge` recreates the home volume |
 | Window vanished after a host compositor restart | | `./testbed.sh run <comp>` again; the mounted socket went stale |
+| `shot` hangs, or `ipc` hangs after a popup opened | the nested window sits on a hidden host workspace and gets no frames | `run`/`start` add a `render_unfocused` host rule for nested windows; a host config reload drops it, so `start <comp>` again (or put the window on screen) |
 | Host Hyprland shows "niri is not responding" (Terminate kills the container) | nested compositors miss xdg pings while their window is hidden or starting | `run` raises `misc:anr_missed_pings` to 60 until the next Hyprland config reload; make it permanent with `hl.config({ misc = { anr_missed_pings = 60 } })`, or set `TESTBED_HOST_TWEAKS=0` to leave the host alone |
 
 ## Publishing the image
