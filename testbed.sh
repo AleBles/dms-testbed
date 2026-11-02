@@ -16,10 +16,12 @@
 #   dms-testbed shot <comp> [out.png]                 # screenshot taken inside the nested compositor
 #   dms-testbed status | stop <comp>|all | rm <comp>|all [--purge]
 #
-# Plugins mounted by `run` (read-only into ~/.config/DankMaterialShell/plugins/): every --plugin DIR; else the current directory if it has a plugin.json;
+# Plugins mounted by `run` (read-only into ~/.config/dms/plugins/): every --plugin DIR; else the current directory if it has a plugin.json;
 # else every $TESTBED_PLUGIN_ROOT/$TESTBED_PLUGIN_GLOB dir with one (defaults: parent dir, dms-*).
-# Env overrides: TESTBED_IMAGE, TESTBED_PLUGIN_ROOT, TESTBED_PLUGIN_GLOB, TESTBED_HOST_TWEAKS=0 (do not
-# raise the host Hyprland ANR ping tolerance; nested compositors miss pings while their window is hidden).
+# Env overrides: TESTBED_IMAGE, TESTBED_PLUGIN_ROOT, TESTBED_PLUGIN_GLOB, TESTBED_HOST_WORKSPACES="9 10" (host
+# Hyprland workspaces the nested windows are parked on, spread evenly; "" = leave them where they open),
+# TESTBED_HOST_MONITOR=eDP-1 (create those workspaces on that monitor),
+# TESTBED_HOST_TWEAKS=0 (no host Hyprland changes at all: no ANR ping tolerance, no window placement).
 set -euo pipefail
 
 IMAGE=${TESTBED_IMAGE:-ghcr.io/alebles/dms-testbed:latest}
@@ -30,7 +32,7 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 die() { printf 'testbed: %s\n' "$*" >&2; exit 1; }
 ALL_COMPS="mango niri hyprland sway labwc miracle"
 need_comp() {
-    case "${1:-}" in mango|niri|hyprland|sway|labwc|miracle) ;; *) die "compositor must be one of: $ALL_COMPS" ;; esac
+    case " $ALL_COMPS " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) false ;; esac || die "compositor must be one of: $ALL_COMPS"
 }
 name_of() { printf 'dms-testbed-%s' "$1"; }
 vol_of()  { printf 'dms-testbed-home-%s' "$1"; }
@@ -53,7 +55,7 @@ plugin_mounts() {
     for d in "${dirs[@]}"; do
         d=$(readlink -f "$d")
         [ -f "$d/plugin.json" ] || { echo "testbed: skipping $d (no plugin.json)" >&2; continue; }
-        printf -- '-v\n%s:/home/tester/.config/DankMaterialShell/plugins/%s:ro\n' "$d" "$(basename "$d")"
+        printf -- '-v\n%s:/home/tester/.config/dms/plugins/%s:ro\n' "$d" "$(basename "$d")"
     done
 }
 
@@ -71,6 +73,69 @@ host_anr_tolerance() {
         || hyprctl keyword misc:anr_missed_pings "$ANR_PINGS" >/dev/null 2>&1; then
         echo "testbed: host Hyprland misc:anr_missed_pings raised $cur -> $ANR_PINGS until its next config reload (TESTBED_HOST_TWEAKS=0 to skip)" >&2
     fi
+}
+
+# A nested compositor window on a hidden host workspace gets no frame callbacks, so nothing inside it
+# renders: grim (`shot`) waits forever, and DMS's Qt render threads block its main thread the first time
+# it maps or unmaps a window, after which `dms ipc` hangs too. render_unfocused makes the host keep
+# rendering those windows. Re-applied on every run/start: runtime rules are dropped on a config reload,
+# and Hyprland applies a new rule to windows that are already open.
+host_render_hidden() {
+    [ "${TESTBED_HOST_TWEAKS:-1}" = 1 ] || return 0
+    [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1 || return 0
+    hyprctl eval "hl.window_rule({ name = \"dms-testbed-render\", match = { class = \"$NESTED_CLASS_RE\" }, render_unfocused = true })" >/dev/null 2>&1 \
+        || hyprctl keyword windowrule "renderunfocused, class:$NESTED_CLASS_RE" >/dev/null 2>&1 || true
+}
+
+# ---- host window placement (Hyprland host only) --------------------------------------------------
+# Nested compositor windows would open on the active workspace; park them on TESTBED_HOST_WORKSPACES
+# instead. A window rule sends new ones to the first workspace silently; after a container is ready,
+# host_place_new moves the windows it created so the list stays evenly used.
+HOST_WORKSPACES=${TESTBED_HOST_WORKSPACES-9 10}
+HOST_MONITOR=${TESTBED_HOST_MONITOR:-}
+NESTED_CLASS_RE='^(wlroots|niri|aquamarine|labwc|Hyprland)$'   # sway/mango: wlroots, nested Hyprland: aquamarine
+host_hyprland() {
+    [ "${TESTBED_HOST_TWEAKS:-1}" = 1 ] && [ -n "$HOST_WORKSPACES" ] && [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1
+}
+# Added on every run/start: a host config reload drops runtime rules, and a rule that is gone would let
+# the next window open on whatever monitor has focus. Re-adding one that still exists is harmless.
+# TESTBED_HOST_MONITOR (e.g. eDP-1) also pins those workspaces to one monitor, so they are never created
+# on the monitor you are working on.
+host_place_rule() {
+    host_hyprland || return 0
+    local first=${HOST_WORKSPACES%% *} ws
+    if [ -n "$HOST_MONITOR" ]; then
+        for ws in $HOST_WORKSPACES; do
+            hyprctl eval "hl.workspace_rule({ workspace = \"$ws\", monitor = \"$HOST_MONITOR\" })" >/dev/null 2>&1 \
+                || hyprctl keyword workspace "$ws, monitor:$HOST_MONITOR" >/dev/null 2>&1 || true
+        done
+    fi
+    if hyprctl eval "hl.window_rule({ name = \"dms-testbed-place\", match = { class = \"$NESTED_CLASS_RE\" }, workspace = \"$first silent\" })" >/dev/null 2>&1 \
+        || hyprctl keyword windowrule "workspace $first silent, class:$NESTED_CLASS_RE" >/dev/null 2>&1; then
+        echo "testbed: host Hyprland rule: nested compositor windows open on workspace $first${HOST_MONITOR:+ on $HOST_MONITOR} (TESTBED_HOST_WORKSPACES${HOST_MONITOR:+, TESTBED_HOST_MONITOR})" >&2
+    fi
+}
+# Addresses of nested compositor windows currently on the host, one per line.
+host_snapshot() {
+    host_hyprland || return 0
+    hyprctl clients -j 2>/dev/null | jq -r --arg re "$NESTED_CLASS_RE" '.[] | select(.class|test($re)) | .address' 2>/dev/null || true
+}
+# Move windows that appeared since `before` to the target workspace holding the fewest nested windows.
+host_place_new() {
+    host_hyprland || return 0
+    local before=$1 addr ws best bestcount count
+    for addr in $(host_snapshot); do
+        case "$before" in *"$addr"*) continue ;; esac
+        best=""; bestcount=999
+        for ws in $HOST_WORKSPACES; do
+            count=$(hyprctl clients -j 2>/dev/null | jq -r --arg re "$NESTED_CLASS_RE" --argjson ws "$ws" '[.[] | select((.class|test($re)) and .workspace.id == $ws)] | length' 2>/dev/null || echo 0)
+            [ "$count" -lt "$bestcount" ] && { best=$ws; bestcount=$count; }
+        done
+        [ -n "$best" ] || continue
+        # Lua-config Hyprland first (follow=false keeps your view where it is), classic dispatcher as fallback.
+        hyprctl dispatch "hl.dsp.window.move({ workspace = [[$best]], window = [[address:$addr]], follow = false })" >/dev/null 2>&1 \
+            || hyprctl dispatch movetoworkspacesilent "$best,address:$addr" >/dev/null 2>&1 || true
+    done
 }
 
 ensure_image() {
@@ -109,6 +174,9 @@ cmd_run() {
     check_host
     ensure_image
     host_anr_tolerance
+    host_render_hidden
+    host_place_rule
+    local before; before=$(host_snapshot)
     local name; name=$(name_of "$comp")
     docker rm -f "$name" >/dev/null 2>&1 || true
 
@@ -125,27 +193,34 @@ cmd_run() {
         -v "$(vol_of "$comp"):/home/tester" \
         "${mounts[@]}" \
         -e "TESTBED_SOFTWARE=$sw" \
+        -e "TESTBED_MIRACLE_NESTED=${TESTBED_MIRACLE_NESTED:-0}" \
         "$IMAGE" "$comp" >/dev/null
 
     echo "testbed: started $name; waiting for DMS to detect the compositor..."
-    wait_ready "$comp"
+    wait_ready "$comp"; local rc=$?
+    host_place_new "$before"
+    return $rc
 }
 
-# Wait until the shell in the container answers IPC (the built-in plugins target).
+# A fresh container: wait for DMS's compositor detection line (the entrypoint truncates the log at
+# start, so it is always this boot's), then for the shell's IPC. Returns 1 when either never comes.
 wait_ready() {
     local comp=$1 name; name=$(name_of "$comp")
-    local i
+    local i log=/home/tester/.local/state/dms-testbed/dms-$comp.log
     for i in $(seq 1 40); do
-        running "$name" || { docker logs "$name" 2>&1 | tail -30; die "$name exited"; }
-        if docker exec "$name" sh -c "grep -q 'Detected' /home/tester/.local/state/dms-testbed/dms-$comp.log 2>/dev/null"; then
-            docker exec "$name" sh -c "grep -m1 'Detected' /home/tester/.local/state/dms-testbed/dms-$comp.log"
-            break
-        fi
+        running "$name" || { docker logs "$name" 2>&1 | tail -30; echo "testbed: $name exited" >&2; return 1; }
+        if docker exec "$name" sh -c "grep -m1 'Detected' $log 2>/dev/null"; then break; fi
         sleep 1
     done
-    # The shell registers its IPC targets a little after it starts; wait for the built-in plugins target.
-    local targets
+    wait_ipc "$comp"
+}
+
+# The shell registers its IPC targets a little after it starts; wait for the built-in plugins target.
+wait_ipc() {
+    local comp=$1 name; name=$(name_of "$comp")
+    local i targets
     for i in $(seq 1 90); do
+        running "$name" || { echo "testbed: $name exited" >&2; return 1; }
         # Capture instead of piping into grep -q: an early pipe close would fail under pipefail.
         targets=$(in_session "$name" dms ipc show 2>/dev/null || true)
         if [ "${targets#*target plugins}" != "$targets" ]; then
@@ -155,6 +230,7 @@ wait_ready() {
         sleep 1
     done
     echo "testbed: shell IPC not ready after waiting; check: dms-testbed logs $comp --dms" >&2
+    return 1
 }
 
 cmd_ipc() {
@@ -179,16 +255,19 @@ cmd_exec() {
 # Focus workspace n with whatever the compositor calls it (workspace, tag, desktop). labwc has no
 # command IPC for this, so it gets the Ctrl+Alt+n keybind from the overlay typed over the
 # virtual-keyboard protocol.
+# The overlays bind Ctrl+Alt+1..3 on every compositor; typed over the virtual-keyboard protocol.
+type_ctrl_alt() { cmd_exec "$1" wtype -M ctrl -M alt -k "$2" -m alt -m ctrl; }
+
 cmd_switch() {
     local comp=$1; shift; need_comp "$comp"
-    local n=${1:-}; [ -n "$n" ] || die "switch needs a workspace number"
+    local n=${1:-}; case "$n" in ''|*[!0-9]*) die "switch needs a workspace number" ;; esac
     case "$comp" in
         hyprland) cmd_exec "$comp" hyprctl dispatch "hl.dsp.focus({ workspace = [[$n]] })" ;;
         niri)     cmd_exec "$comp" niri msg action focus-workspace "$n" ;;
         mango)    cmd_exec "$comp" mmsg dispatch "view,$n" ;;
         sway)     cmd_exec "$comp" swaymsg workspace number "$n" ;;
-        miracle)  cmd_exec "$comp" sh -c 'swaymsg -s "$MIRACLESOCK" workspace "$1" 2>/dev/null || wtype -M ctrl -M alt -k "$1" -m alt -m ctrl' sh "$n" ;;   # no "number": miracle takes it literally
-        labwc)    cmd_exec "$comp" wtype -M ctrl -M alt -k "$n" -m alt -m ctrl ;;
+        miracle)  cmd_exec "$comp" sh -c '[ -n "$MIRACLESOCK" ] || { echo "MIRACLESOCK not set in the session" >&2; exit 1; }; swaymsg -s "$MIRACLESOCK" workspace "$1"' sh "$n" ;;   # no "number": miracle takes it literally
+        labwc)    [ "$n" -ge 1 ] && [ "$n" -le 3 ] || die "labwc overlay binds desktops 1..3 only"; type_ctrl_alt "$comp" "$n" ;;
     esac
 }
 
@@ -199,13 +278,20 @@ cmd_reload() {
 
 # Start an existing, stopped container again (keeps its mounts and home volume; `run` would recreate it).
 cmd_start() {
-    local c name; for c in $(each_comp "${1:-}"); do
+    check_host; host_anr_tolerance; host_render_hidden; host_place_rule
+    local before; before=$(host_snapshot)
+    local c name started=() rc=0
+    for c in $(each_comp "${1:-}"); do
         name=$(name_of "$c")
-        docker inspect "$name" >/dev/null 2>&1 || { echo "testbed: $name does not exist; use: dms-testbed run $c" >&2; continue; }
+        docker inspect "$name" >/dev/null 2>&1 || { echo "testbed: $name does not exist; use: dms-testbed run $c" >&2; rc=1; continue; }
         running "$name" && { echo "$name already running"; continue; }
-        check_host; host_anr_tolerance
-        docker start "$name" >/dev/null && echo "started $name" && wait_ready "$c"
+        if docker start "$name" >/dev/null; then echo "started $name"; started+=("$c")
+        else echo "testbed: could not start $name (a stale host Wayland socket? then: dms-testbed run $c)" >&2; rc=1; fi
     done
+    # Boots are independent; wait only after every container is starting.
+    for c in "${started[@]}"; do wait_ready "$c" || rc=1; done
+    host_place_new "$before"
+    return $rc
 }
 
 # Restart the shell inside the session. Needed after adding *new* files to a plugin: Qt caches the
@@ -214,8 +300,18 @@ cmd_restart_shell() {
     local comp=$1; need_comp "$comp"
     local name; name=$(name_of "$comp")
     running "$name" || die "$name is not running"
-    in_session "$name" dms restart >/dev/null 2>&1 || true
-    wait_ready "$comp"
+    local old; old=$(docker exec "$name" pgrep -x qs 2>/dev/null | head -1 || true)
+    [ -n "$old" ] || die "no shell process (qs) in $name; check: dms-testbed logs $comp --dms"
+    in_session "$name" dms restart >/dev/null || die "dms restart failed in $name"
+    # The old shell answers IPC and its log lines are still there until it is gone: wait for a new qs pid.
+    local i new
+    for i in $(seq 1 60); do
+        new=$(docker exec "$name" pgrep -x qs 2>/dev/null | head -1 || true)
+        [ -n "$new" ] && [ "$new" != "$old" ] && break
+        sleep 1
+    done
+    [ -n "$new" ] && [ "$new" != "$old" ] || die "shell did not come back within 60s; check: dms-testbed logs $comp --dms"
+    wait_ipc "$comp"
 }
 
 cmd_shell() {
@@ -258,18 +354,19 @@ cmd_status() {
 each_comp() { if [ "${1:-}" = "all" ]; then echo "$ALL_COMPS"; else need_comp "${1:-}"; echo "$1"; fi; }
 
 cmd_stop() {
-    local c; for c in $(each_comp "${1:-}"); do docker stop -t 5 "$(name_of "$c")" >/dev/null 2>&1 && echo "stopped $(name_of "$c")" || true; done
+    local c names=(); for c in $(each_comp "${1:-}"); do running "$(name_of "$c")" && names+=("$(name_of "$c")"); done
+    [ ${#names[@]} -gt 0 ] || { echo "nothing running"; return 0; }
+    docker stop -t 5 "${names[@]}" 2>/dev/null | sed 's/^/stopped /'
 }
 
 cmd_rm() {
     local target=${1:-}; shift || true
     local purge=0; [ "${1:-}" = "--purge" ] && purge=1
-    local c; for c in $(each_comp "$target"); do
-        docker rm -f "$(name_of "$c")" >/dev/null 2>&1 && echo "removed $(name_of "$c")" || true
-        if [ "$purge" = 1 ]; then
-            docker volume rm "$(vol_of "$c")" >/dev/null 2>&1 && echo "removed volume $(vol_of "$c")" || true
-        fi
-    done
+    local c names=() vols=()
+    for c in $(each_comp "$target"); do names+=("$(name_of "$c")"); vols+=("$(vol_of "$c")"); done
+    docker rm -f "${names[@]}" 2>/dev/null | sed 's/^/removed /' || true
+    [ "$purge" = 1 ] && { docker volume rm "${vols[@]}" 2>/dev/null | sed 's/^/removed volume /' || true; }
+    return 0
 }
 
 sub=${1:-}; shift || true
@@ -290,6 +387,6 @@ case "$sub" in
     status) cmd_status ;;
     stop)   cmd_stop "$@" ;;
     rm)     cmd_rm "$@" ;;
-    ""|-h|--help|help) sed -n '2,22p' "$0" ;;
+    ""|-h|--help|help) awk 'NR>1 { if ($0 !~ /^#/) exit; print }' "$0" ;;
     *) die "unknown subcommand: $sub (try --help)" ;;
 esac

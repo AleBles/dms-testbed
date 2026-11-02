@@ -1,7 +1,7 @@
 {
   "name": "dms-testbed",
   "version": "0.2.0",
-  "description": "Run DankMaterialShell plugins in nested Hyprland, niri, Mango, sway, labwc and Miracle WM containers",
+  "description": "Run Dux Shell (DMS) plugins in nested Hyprland, niri, Mango, sway, labwc and Miracle WM containers",
   "license": "MIT",
   "private": true,
   "repository": "github:AleBles/dms-testbed",
@@ -10,6 +10,7 @@
   },
   "files": [
     "testbed.sh",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ]
 }

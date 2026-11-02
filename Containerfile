@@ -1,13 +1,13 @@
-# dms-testbed: DankMaterialShell + Hyprland, niri, mangowc, sway, labwc and miracle-wm on Fedora 44,
+# dms-testbed: Dux Shell (DMS) + Hyprland, niri, mangowc, sway, labwc and miracle-wm on Fedora 44,
 # for testing DMS plugins in nested compositors. Repo choices mirror the DMS installer
-# (core/internal/distros/fedora.go): COPR avengemedia/dms, avengemedia/danklinux,
+# (core/internal/distros/repos.go): COPR duxlabs/dms, duxlabs/dux-repo,
 # lionheartp/Hyprland; niri from Fedora; mangowm from Terra.
 FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf -y install dnf-plugins-core && dnf clean all
 
 # COPR repos, written directly (same format as `dnf copr enable` produces).
-RUN for spec in "avengemedia/dms" "avengemedia/danklinux" "lionheartp/Hyprland"; do \
+RUN for spec in "duxlabs/dms" "duxlabs/dux-repo" "lionheartp/Hyprland"; do \
       owner=${spec%/*}; repo=${spec#*/}; \
       printf '%s\n' \
         "[copr:copr.fedorainfracloud.org:${owner}:${repo}]" \
@@ -53,13 +53,13 @@ RUN dnf -y install --setopt=install_weak_deps=False grim wtype google-noto-sans-
 
 # Fedora's sway carries cap_sys_nice=ep as a file capability; a container's bounding set lacks it, so exec fails
 # with EPERM. Nested sway does not need realtime scheduling; drop the capability.
-RUN setcap -r /usr/bin/sway || true
+RUN if getcap /usr/bin/sway | grep -q .; then setcap -r /usr/bin/sway; fi && ! getcap /usr/bin/sway | grep -q .
 
 RUN getent group render >/dev/null || groupadd -r render; \
     getent group video  >/dev/null || groupadd -r video; \
     getent group input  >/dev/null || groupadd -r input; \
     groupadd -g 1000 tester && useradd -u 1000 -g 1000 -G video,render,input -m -s /bin/bash tester \
-    && su tester -c 'mkdir -p ~/.config/DankMaterialShell/plugins ~/.local/state/dms-testbed ~/.local/share ~/.cache'
+    && su tester -c 'mkdir -p ~/.config/dms/plugins ~/.local/state/dms-testbed ~/.local/share ~/.cache'
 
 RUN mkdir -p /tmp/xdg && chown tester /tmp/xdg && chmod 700 /tmp/xdg \
     && su tester -c 'export XDG_RUNTIME_DIR=/tmp/xdg; { echo "built: $(date -u +%FT%TZ)"; dms version 2>&1 | head -1; \

@@ -3,8 +3,9 @@
 #   entrypoint.sh <mango|niri|hyprland|sway|labwc|miracle>
 set -euo pipefail
 
-COMP=${1:?usage: entrypoint.sh <mango|niri|hyprland|sway|labwc|miracle>}
-case "$COMP" in mango|niri|hyprland|sway|labwc|miracle) ;; *) echo "unknown compositor: $COMP" >&2; exit 2 ;; esac
+COMP=${1:?usage: entrypoint.sh <compositor>}
+# A compositor is known when it has an overlay directory in the image (container/overlays/<comp>/).
+[ "$COMP" != common ] && [ -d "/opt/testbed/overlays/$COMP" ] || { echo "unknown compositor: $COMP (no /opt/testbed/overlays/$COMP)" >&2; exit 2; }
 
 log() { printf '[testbed] %s\n' "$*" >&2; }
 
@@ -16,16 +17,18 @@ HOST_SOCK=/run/host-wayland/wayland-1
 # A relative name for the host display; the nested compositor creates its own wayland-N next to it.
 ln -sfn "$HOST_SOCK" "$XDG_RUNTIME_DIR/wayland-host"
 
-# Never let host compositor identity leak into the nested session (DMS falls back to these vars).
-unset HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET MANGO_INSTANCE_SIGNATURE SWAYSOCK I3SOCK MIRACLESOCK LABWC_PID DISPLAY \
-      DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_ID WAYLAND_SOCKET || true
+# Compositor identity variables: scrubbed here so the host's never leak into the nested session (DMS
+# falls back to them), and captured from the running shell below so `docker exec` gets the nested ones.
+COMP_VARS="HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET MANGO_INSTANCE_SIGNATURE SWAYSOCK I3SOCK MIRACLESOCK LABWC_PID"
+# shellcheck disable=SC2086
+unset $COMP_VARS DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_ID WAYLAND_SOCKET || true
 
 # ---- session bus at a fixed path so `docker exec` can find it ------------------------------------
 dbus-daemon --session --fork --nopidfile --address="unix:path=$XDG_RUNTIME_DIR/bus"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 
-# ---- plugins: host repos are bind-mounted read-only at ~/.config/DankMaterialShell/plugins/<dir> ------
-PLUGDIR="$XDG_CONFIG_HOME/DankMaterialShell/plugins"
+# ---- plugins: host repos are bind-mounted read-only at ~/.config/dms/plugins/<dir> ------
+PLUGDIR="$XDG_CONFIG_HOME/dms/plugins"
 mkdir -p "$PLUGDIR"
 find "$PLUGDIR" -maxdepth 1 -xtype l -delete 2>/dev/null || true       # links left by older testbed versions
 shopt -s nullglob
@@ -106,7 +109,7 @@ printf 'DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS" > "$ENVFILE"
             {
                 printf 'DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS"
                 tr '\0' '\n' < "/proc/$pid/environ" \
-                    | grep -E '^(WAYLAND_DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|NIRI_SOCKET|MANGO_INSTANCE_SIGNATURE|SWAYSOCK|I3SOCK|MIRACLESOCK|LABWC_PID|XDG_CURRENT_DESKTOP)=' || true
+                    | grep -E "^(WAYLAND_DISPLAY|${COMP_VARS// /|}|XDG_CURRENT_DESKTOP)=" || true
             } > "$ENVFILE.tmp" && mv "$ENVFILE.tmp" "$ENVFILE"
             log "shell is up (qs pid $pid); env for docker exec written"
             sleep 2
